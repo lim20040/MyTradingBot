@@ -3,62 +3,57 @@ import hmac
 import hashlib
 import time
 import aiohttp
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
-# --- 환경변수 설정 (본인의 키를 여기에 입력하세요) ---
-BINGX_API_KEY    = "YAXc8PKbKMHafqyl353ViY2XLBZGEIDyz883bxvHegR6nc5Vfvf2Wye5QqGtC4DnEZAnZH98S1y9TByk0Tsg"
-BINGX_API_SECRET = "IDvLrNomyhrJspNnMBiJT4T7INJCXJ7cS7Ej39m0oipjDaHsoQEGrJq2C08F1UnN1WBUInIW4WDPC1zawwspA"
-BYBIT_API_KEY    = "sk8aiEADPhwdk4HVly"
-BYBIT_API_SECRET = "PpHkUqnCUPsq0mO8sxsjjLXRL7GgVfEgRZtv"
+# --- API 설정 (본인의 키를 입력하세요) ---
+BINGX_ACC1_KEY    = "YAXc8PKbKMHafqyl353ViY2XLBZGEIDyz883bxvHegR6nc5Vfvf2Wye5QqGtC4DnEZAnZH98S1y9TByk0Tsg"
+BINGX_ACC1_SECRET = "IDvLrNomyhrJspNnMBiJT4T7INJCXJ7cS7Ej39m0oipjDaHsoQEGrJq2C08F1UnN1WBUInIW4WDPC1zawwspA"
+
+BINGX_ACC2_KEY    = "3NZaUYyrIMiO0RcKk4m5lyq83HFQnUrLnd381uKhDfN0jfp2TOvdQfVEuk5Ge5zECVsrsKxm6AZ11Azw"
+BINGX_ACC2_SECRET = "qsQ2hDBahCrFBuvZr7BxlUm7ja7uYijdunvZxG7zXGIQM7aiEApzK41A8mVahKqUc3NIKTXaZQypWMg43g"
 
 # --- 공통 유틸 ---
-def now_ms():
-    return int(time.time() * 1000)
+def bingx_sign(params, secret):
+    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    return hmac.new(secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
-async def fetch(session, url, params=None, headers=None):
+async def get_bingx_data(session, api_key, secret, days):
+    url = "https://open-api.bingx.com/openApi/swap/v2/user/getClosedProfit"
+    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    
+    params = {
+        "timestamp": int(time.time() * 1000),
+        "startTime": start_time,
+        "limit": 100
+    }
+    params["signature"] = bingx_sign(params, secret)
+    headers = {"X-BX-APIKEY": api_key}
+    
     async with session.get(url, params=params, headers=headers) as response:
-        # 403 에러 등이 나더라도 봇이 죽지 않게 예외 처리
-        if response.status != 200:
-            return None
-        try:
-            return await response.json()
-        except:
-            return None
-
-# --- 바이비트 서명 ---
-def bybit_sign(params, secret):
-    param_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    return hmac.new(secret.encode(), param_str.encode(), hashlib.sha256).hexdigest()
+        if response.status == 200:
+            data = await response.json()
+            return data.get("data", [])
+        return []
 
 # --- 통합 리포트 생성 ---
 async def get_combined_report(days):
-    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    
     async with aiohttp.ClientSession() as session:
-        # 바이비트 데이터 가져오기 (실패해도 None 반환)
-        bybit_url = "https://api.bybit.com/v5/position/closed-pnl"
-        bybit_params = {
-            "category": "linear", # 본인 계정이 Inverse라면 'inverse'로 수정 필요
-            "limit": 100,
-            "startTime": start_time,
-            "api_key": BYBIT_API_KEY,
-            "timestamp": now_ms(),
-            "recv_window": 5000
-        }
-        bybit_params["sign"] = bybit_sign(bybit_params, BYBIT_API_SECRET)
+        # 두 계정 데이터 동시 호출
+        acc1_trades = await get_bingx_data(session, BINGX_ACC1_KEY, BINGX_ACC1_SECRET, days)
+        acc2_trades = await get_bingx_data(session, BINGX_ACC2_KEY, BINGX_ACC2_SECRET, days)
         
-        bybit_data = await fetch(session, bybit_url, params=bybit_params)
+        # 수익 계산
+        pnl1 = sum(float(t.get("closedProfit", 0)) for t in acc1_trades)
+        pnl2 = sum(float(t.get("closedProfit", 0)) for t in acc2_trades)
         
-        # 리포트 텍스트 생성
-        report = f"📊 **최근 {days}일 거래 리포트**\n\n"
+        total_pnl = pnl1 + pnl2
+        total_count = len(acc1_trades) + len(acc2_trades)
         
-        if bybit_data and bybit_data.get("result", {}).get("list"):
-            trades = bybit_data["result"]["list"]
-            total_pnl = sum(float(t.get("closedPnl", 0)) for t in trades)
-            report += f"✅ **Bybit 성과**\n- 실현 손익: {total_pnl:.2f} USDT\n- 종료된 포지션: {len(trades)}건\n"
-        else:
-            report += "❌ **Bybit**: 데이터를 가져올 수 없습니다. (API 권한 확인 필요)\n"
-            
-        report += "\n(BingX 데이터는 현재 준비 중입니다.)"
+        report = f"📊 **최근 {days}일 BingX 통합 리포트**\n\n"
+        report += f"💰 **계정 1 수익:** {pnl1:.2f} USDT ({len(acc1_trades)}건)\n"
+        report += f"💰 **계정 2 수익:** {pnl2:.2f} USDT ({len(acc2_trades)}건)\n"
+        report += "---" * 5 + "\n"
+        report += f"🔥 **총 합계:** {total_pnl:.2f} USDT\n"
+        report += f"📈 **총 거래:** {total_count}건"
         
         return report
