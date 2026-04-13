@@ -6,8 +6,8 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 
 # 환경변수에서 API 키 로드
-BINGX_API_KEY    = ""
-BINGX_API_SECRET = ""
+BINGX_API_KEY    = "YAXc8PKbKMHafqyl353ViY2XLBZGEIDyz883bxvHegR6nc5Vfvf2Wye5QqGtC4DnEZAnZH98S1y9TByk0Tsg"
+BINGX_API_SECRET = "IDvLrNomyhrJspNnMBiJT4T7INJCXJ7cS7Ej39m0oipjDaHsoQEGrJq2C08F1UnN1WBUInIW4WDPC1zawwspA"
 BYBIT_API_KEY    = "sk8aiEADPhwdk4HVly"
 BYBIT_API_SECRET = "PpHkUqnCUPsq0mO8sxsjjLXRL7GgVfEgRZtv"
 
