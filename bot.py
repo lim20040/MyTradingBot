@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from exchanges import get_combined_report
 
-BOT_TOKEN = os.environ.get("8235198849:AAG_EhtfSFihmtnaAmskdq1BfnyO0DAhiBY")
+BOT_TOKEN = "8235198849:AAG_EhtfSFihmtnaAmskdq1BfnyO0DAhiBY"
 ALLOWED_USER_ID = int(os.environ.get("1801734156", "0"))  # 본인 텔레그램 ID
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
