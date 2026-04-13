@@ -6,10 +6,10 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 
 # 환경변수에서 API 키 로드
-BINGX_API_KEY    = os.environ.get("BINGX_API_KEY")
-BINGX_API_SECRET = os.environ.get("BINGX_API_SECRET")
-BYBIT_API_KEY    = os.environ.get("BYBIT_API_KEY")
-BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET")
+BINGX_API_KEY    = os.environ.get("YAXc8PKbKMHafqyl353ViY2XLBZGEIDyz883bxvHegR6nc5Vfvf2Wye5QqGtC4DnEZAnZH98S1y9TByk0Tsg")
+BINGX_API_SECRET = os.environ.get("IDvLrNomyhrJspNnMBiJT4T7INJCXJ7cS7Ej39m0oipjDaHsoQEGrJq2C08F1UnN1WBUInIW4WDPC1zawwspA")
+BYBIT_API_KEY    = os.environ.get("sk8aiEADPhwdk4HVly")
+BYBIT_API_SECRET = os.environ.get("PpHkUqnCUPsq0mO8sxsjjLXRL7GgVfEgRZtv")
 
 # ────────── 공통 유틸 ──────────
 
