@@ -5,180 +5,60 @@ import time
 import aiohttp
 from datetime import datetime, timedelta, timezone
 
-# 환경변수에서 API 키 로드
+# --- 환경변수 설정 (본인의 키를 여기에 입력하세요) ---
 BINGX_API_KEY    = "YAXc8PKbKMHafqyl353ViY2XLBZGEIDyz883bxvHegR6nc5Vfvf2Wye5QqGtC4DnEZAnZH98S1y9TByk0Tsg"
 BINGX_API_SECRET = "IDvLrNomyhrJspNnMBiJT4T7INJCXJ7cS7Ej39m0oipjDaHsoQEGrJq2C08F1UnN1WBUInIW4WDPC1zawwspA"
 BYBIT_API_KEY    = "sk8aiEADPhwdk4HVly"
 BYBIT_API_SECRET = "PpHkUqnCUPsq0mO8sxsjjLXRL7GgVfEgRZtv"
 
-# ────────── 공통 유틸 ──────────
-
+# --- 공통 유틸 ---
 def now_ms():
     return int(time.time() * 1000)
 
-def ms_to_dt(ms):
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+async def fetch(session, url, params=None, headers=None):
+    async with session.get(url, params=params, headers=headers) as response:
+        # 403 에러 등이 나더라도 봇이 죽지 않게 예외 처리
+        if response.status != 200:
+            return None
+        try:
+            return await response.json()
+        except:
+            return None
 
-# ────────── 빙엑스 ──────────
-
-def bingx_sign(params: dict, secret: str) -> str:
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-
-async def fetch_bingx_trades(days: int) -> list:
-    """빙엑스 선물 거래 내역 (closed orders)"""
-    end_ms   = now_ms()
-    start_ms = end_ms - days * 86400 * 1000
-
-    params = {
-        "timestamp":  end_ms,
-        "recvWindow": 5000,
-        "startTime":  start_ms,
-        "endTime":    end_ms,
-        "limit":      1000,
-    }
-    params["signature"] = bingx_sign(params, BINGX_API_SECRET)
-
-    url = "https://open-api.bingx.com/openApi/swap/v2/trade/allOrders"
-    headers = {"X-BX-APIKEY": BINGX_API_KEY}
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, headers=headers) as resp:
-            data = await resp.json()
-
-    orders = data.get("data", {}).get("orders", [])
-    # 체결 완료 + 수익 있는 건만
-    filled = [o for o in orders if o.get("status") == "FILLED"]
-    return filled
-
-def parse_bingx(orders: list) -> dict:
-    trades = len(orders)
-    wins   = sum(1 for o in orders if float(o.get("profit", 0)) > 0)
-    losses = sum(1 for o in orders if float(o.get("profit", 0)) < 0)
-    total_pnl   = sum(float(o.get("profit", 0)) for o in orders)
-    profits_pos = [float(o.get("profit", 0)) for o in orders if float(o.get("profit", 0)) > 0]
-    profits_neg = [float(o.get("profit", 0)) for o in orders if float(o.get("profit", 0)) < 0]
-    avg_win  = (sum(profits_pos) / len(profits_pos)) if profits_pos else 0
-    avg_loss = (sum(profits_neg) / len(profits_neg)) if profits_neg else 0
-    max_win  = max(profits_pos) if profits_pos else 0
-    max_loss = min(profits_neg) if profits_neg else 0
-    win_rate = (wins / trades * 100) if trades else 0
-
-    return dict(trades=trades, wins=wins, losses=losses, total_pnl=total_pnl,
-                avg_win=avg_win, avg_loss=avg_loss, max_win=max_win, max_loss=max_loss,
-                win_rate=win_rate)
-
-# ────────── 바이비트 ──────────
-
-def bybit_sign(params: dict, secret: str, ts: int) -> str:
-    param_str = str(ts) + BYBIT_API_KEY + "5000" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+# --- 바이비트 서명 ---
+def bybit_sign(params, secret):
+    param_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
     return hmac.new(secret.encode(), param_str.encode(), hashlib.sha256).hexdigest()
 
-async def fetch_bybit_trades(days: int) -> list:
-    """바이비트 선물 거래 내역"""
-    end_ms   = now_ms()
-    start_ms = end_ms - days * 86400 * 1000
-
-    ts = now_ms()
-    params = {
-        "category":  "linear",
-        "startTime": start_ms,
-        "endTime":   end_ms,
-        "limit":     200,
-    }
-    sign = bybit_sign(params, BYBIT_API_SECRET, ts)
-
-    headers = {
-        "X-BAPI-API-KEY":   BYBIT_API_KEY,
-        "X-BAPI-SIGN":      sign,
-        "X-BAPI-TIMESTAMP": str(ts),
-        "X-BAPI-RECV-WINDOW": "5000",
-    }
-
-    url = "https://api.bybit.com/v5/position/closed-pnl"
+# --- 통합 리포트 생성 ---
+async def get_combined_report(days):
+    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, headers=headers) as resp:
-            data = await resp.json()
-
-    return data.get("result", {}).get("list", [])
-
-def parse_bybit(orders: list) -> dict:
-    trades = len(orders)
-    wins   = sum(1 for o in orders if float(o.get("closedPnl", 0)) > 0)
-    losses = sum(1 for o in orders if float(o.get("closedPnl", 0)) < 0)
-    total_pnl   = sum(float(o.get("closedPnl", 0)) for o in orders)
-    profits_pos = [float(o.get("closedPnl", 0)) for o in orders if float(o.get("closedPnl", 0)) > 0]
-    profits_neg = [float(o.get("closedPnl", 0)) for o in orders if float(o.get("closedPnl", 0)) < 0]
-    avg_win  = (sum(profits_pos) / len(profits_pos)) if profits_pos else 0
-    avg_loss = (sum(profits_neg) / len(profits_neg)) if profits_neg else 0
-    max_win  = max(profits_pos) if profits_pos else 0
-    max_loss = min(profits_neg) if profits_neg else 0
-    win_rate = (wins / trades * 100) if trades else 0
-
-    return dict(trades=trades, wins=wins, losses=losses, total_pnl=total_pnl,
-                avg_win=avg_win, avg_loss=avg_loss, max_win=max_win, max_loss=max_loss,
-                win_rate=win_rate)
-
-# ────────── 합산 리포트 ──────────
-
-async def get_combined_report(days: int) -> str:
-    bingx_orders = await fetch_bingx_trades(days)
-    bybit_orders = await fetch_bybit_trades(days)
-
-    bx = parse_bingx(bingx_orders)
-    bb = parse_bybit(bybit_orders)
-
-    # 합산
-    trades    = bx["trades"]    + bb["trades"]
-    wins      = bx["wins"]      + bb["wins"]
-    losses    = bx["losses"]    + bb["losses"]
-    total_pnl = bx["total_pnl"] + bb["total_pnl"]
-
-    all_wins  = ([float(o.get("profit",    0)) for o in bingx_orders if float(o.get("profit",    0)) > 0] +
-                 [float(o.get("closedPnl", 0)) for o in bybit_orders if float(o.get("closedPnl", 0)) > 0])
-    all_loss  = ([float(o.get("profit",    0)) for o in bingx_orders if float(o.get("profit",    0)) < 0] +
-                 [float(o.get("closedPnl", 0)) for o in bybit_orders if float(o.get("closedPnl", 0)) < 0])
-
-    avg_win  = (sum(all_wins) / len(all_wins)) if all_wins else 0
-    avg_loss = (sum(all_loss) / len(all_loss)) if all_loss else 0
-    max_win  = max(all_wins)  if all_wins else 0
-    max_loss = min(all_loss)  if all_loss else 0
-    win_rate = (wins / trades * 100) if trades else 0
-
-    pnl_sign  = "🟢 +" if total_pnl >= 0 else "🔴 "
-    pf_text   = f"{(sum(all_wins) / abs(sum(all_loss))):.2f}" if all_loss else "∞ (손실 없음)"
-
-    end_dt   = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=days)
-    date_str = f"{start_dt.strftime('%Y-%m-%d')} ~ {end_dt.strftime('%Y-%m-%d')}"
-
-    # 연속 승패 계산 (바이비트 기준 + 빙엑스 합산은 단순화)
-    streak_win = streak_loss = 0
-    cur_win = cur_loss = 0
-    all_results = (
-        [float(o.get("profit",    0)) for o in bingx_orders] +
-        [float(o.get("closedPnl", 0)) for o in bybit_orders]
-    )
-    for r in all_results:
-        if r > 0:
-            cur_win += 1; cur_loss = 0
-        elif r < 0:
-            cur_loss += 1; cur_win = 0
-        streak_win  = max(streak_win,  cur_win)
-        streak_loss = max(streak_loss, cur_loss)
-
-    text = (
-        f"<b>개인매매내역</b>\n"
-        f"📊 성과 리포트 — 최근 {days}일\n"
-        f"({date_str})\n\n"
-        f"• 총 거래: {trades}건 (승 {wins} / 패 {losses})\n"
-        f"• 승률: {win_rate:.1f}%\n"
-        f"• 총 손익: {pnl_sign}{total_pnl:,.2f} USDT\n"
-        f"• 평균 이익: +{avg_win:,.2f} USDT\n"
-        f"• 평균 손실: {avg_loss:,.2f} USDT\n"
-        f"• 최대 단건 이익: +{max_win:,.2f} USDT\n"
-        f"• 최대 단건 손실: {max_loss:,.2f} USDT\n"
-        f"• 손익비(PF): {pf_text}\n"
-        f"• 연속 최대 승/패: {streak_win}연승 / {streak_loss}연패"
-    )
-    return text
+        # 바이비트 데이터 가져오기 (실패해도 None 반환)
+        bybit_url = "https://api.bybit.com/v5/position/closed-pnl"
+        bybit_params = {
+            "category": "linear", # 본인 계정이 Inverse라면 'inverse'로 수정 필요
+            "limit": 100,
+            "startTime": start_time,
+            "api_key": BYBIT_API_KEY,
+            "timestamp": now_ms(),
+            "recv_window": 5000
+        }
+        bybit_params["sign"] = bybit_sign(bybit_params, BYBIT_API_SECRET)
+        
+        bybit_data = await fetch(session, bybit_url, params=bybit_params)
+        
+        # 리포트 텍스트 생성
+        report = f"📊 **최근 {days}일 거래 리포트**\n\n"
+        
+        if bybit_data and bybit_data.get("result", {}).get("list"):
+            trades = bybit_data["result"]["list"]
+            total_pnl = sum(float(t.get("closedPnl", 0)) for t in trades)
+            report += f"✅ **Bybit 성과**\n- 실현 손익: {total_pnl:.2f} USDT\n- 종료된 포지션: {len(trades)}건\n"
+        else:
+            report += "❌ **Bybit**: 데이터를 가져올 수 없습니다. (API 권한 확인 필요)\n"
+            
+        report += "\n(BingX 데이터는 현재 준비 중입니다.)"
+        
+        return report
