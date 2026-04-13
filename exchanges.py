@@ -2,66 +2,52 @@ import hmac
 import hashlib
 import time
 import aiohttp
+import base64
 from datetime import datetime, timedelta
 
-# --- API 설정 ---
-BINGX_ACC1_KEY    = "YAXc8PKbKMHafqyl353ViY2XLBZGEIDyz883bxvHegR6nc5Vfvf2Wye5QqGtC4DnEZAnZH98S1y9TByk0Tsg"
-BINGX_ACC1_SECRET = "IDvLrNomyhrJspNnMBiJT4T7INJCXJ7cS7Ej39m0oipjDaHsoQEGrJq2C08F1UnN1WBUInIW4WDPC1zawwspA"
+# --- OKX API 설정 (Passphrase가 반드시 필요합니다) ---
+OKX_API_KEY    = "b3bbbe7f-3782-4d4c-abe6-abfb6995b387"
+OKX_API_SECRET = "1862D6D68735644487A1CB210DA841AF"
+OKX_PASSPHRASE = "Lim1004!" # OKX는 키 만들 때 직접 정한 비번이 하나 더 있습니다.
 
-BINGX_ACC2_KEY    = "3NZaUYyrIMiO0RcKk4m5lyq83HFQnUrLnd381uKhDfN0jfp2TOvdQfVEuk5Ge5zECVsrsKxm6AZ11Azw"
-BINGX_ACC2_SECRET = "qsQ2hDBahCrFBuvZr7BxlUm7ja7uYijdunvZxG7zXGIQM7aiEApzK41A8mVahKqUc3NIKTXaZQypWMg43g"
-
-def bingx_sign(params, secret):
-    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    return hmac.new(secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-async def get_bingx_trades(session, api_key, secret, days):
-    # 무기한 선물(Perp)의 실제 체결 내역(User Trade History) 경로
-    url = "https://open-api.bingx.com/openApi/swap/v2/user/tradeHistory"
-    
-    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    params = {
-        "timestamp": int(time.time() * 1000),
-        "startTime": start_time,
-        "limit": 500  # 최대한 많이 긁어옵니다.
-    }
-    params["signature"] = bingx_sign(params, secret)
-    headers = {"X-BX-APIKEY": api_key}
-    
-    async with session.get(url, params=params, headers=headers) as response:
-        res_json = await response.json()
-        if res_json.get("code") == 0:
-            return res_json.get("data", [])
-        return []
+def okx_sign(timestamp, method, request_path, secret):
+    message = timestamp + method + request_path
+    mac = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256)
+    return base64.b64encode(mac.digest()).decode("utf-8")
 
 async def get_combined_report(days):
+    # 최근 3개월 내역까지 조회 가능한 OKX V5 경로
+    method = "GET"
+    request_path = "/api/v5/account/bills?instType=SWAP&mgnMode=cross&type=5" # type 5가 실현손익 내역
+    timestamp = datetime.utcnow().isoformat()[:-3] + "Z"
+    
+    headers = {
+        "OK-ACCESS-KEY": OKX_API_KEY,
+        "OK-ACCESS-SIGN": okx_sign(timestamp, method, request_path, OKX_API_SECRET),
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+
     async with aiohttp.ClientSession() as session:
-        acc1 = await get_bingx_trades(session, BINGX_ACC1_KEY, BINGX_ACC1_SECRET, days)
-        acc2 = await get_bingx_trades(session, BINGX_ACC2_KEY, BINGX_ACC2_SECRET, days)
-        all_trades = acc1 + acc2
+        url = f"https://www.okx.com{request_path}"
+        async with session.get(url, headers=headers) as response:
+            res = await response.json()
+            
+            if res.get("code") != "0":
+                return f"❌ **OKX API 에러**\n- 메시지: {res.get('msg')}\n(OKX는 Passphrase가 틀리면 인증이 안 됩니다.)"
 
-        # 실제로 손익(realizedPnl)이 발생한 기록만 필터링
-        final_trades = []
-        for t in all_trades:
-            pnl = float(t.get('realizedPnl', 0))
-            if pnl != 0: # 0이 아닌 것(수익이나 손실이 확정된 것)만 수집
-                final_trades.append(pnl)
+            data = res.get("data", [])
+            if not data:
+                return f"📊 **최근 {days}일간 OKX 매매 내역이 없습니다.**"
 
-        if not final_trades:
-            return f"📊 **최근 {days}일간 실제 체결된 손익 내역이 없습니다.**\n(포지션 종료 시 발생하는 실현 손익 기준)"
-
-        wins = [p for p in final_trades if p > 0]
-        losses = [p for p in final_trades if p < 0]
-        
-        total_pnl = sum(final_trades)
-        win_rate = (len(wins) / len(final_trades)) * 100 if final_trades else 0
-        
-        report = f"📊 **성과 리포트 — 최근 {days}일 (실체결 기준)**\n"
-        report += "━━━━━━━━━━━━━━━━━━\n"
-        report += f"• **총 거래:** {len(final_trades)}건 (승 {len(wins)} / 패 {len(losses)})\n"
-        report += f"• **승률:** {win_rate:.1f}%\n"
-        report += f"• **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.4f} USDT\n"
-        report += f"• **최대 수익:** {max(final_trades):+.4f} USDT\n"
-        report += f"• **최대 손실:** {min(final_trades):+.4f} USDT\n"
-        
-        return report
+            # pnl 필드를 합산하여 계산
+            pnls = [float(item['pnl']) for item in data if item.get('pnl')]
+            total_pnl = sum(pnls)
+            
+            report = f"📊 **OKX 성과 리포트**\n"
+            report += "━━━━━━━━━━━━━━━━━━\n"
+            report += f"• **총 거래:** {len(pnls)}건\n"
+            report += f"• **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.2f} USDT\n"
+            
+            return report
