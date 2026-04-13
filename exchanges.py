@@ -17,6 +17,7 @@ def okx_sign(timestamp, method, request_path, secret):
 
 async def get_combined_report(days):
     method = "GET"
+    # 포지션 히스토리 경로
     request_path = "/api/v5/account/positions-history?instType=SWAP&limit=50"
     timestamp = datetime.utcnow().isoformat()[:-3] + "Z"
     
@@ -38,13 +39,23 @@ async def get_combined_report(days):
 
             data = res.get("data", [])
             
+            # --- 핵심 수정 부분: 조회 시작 시점을 오늘 자정으로 설정 ---
+            if days == 1:
+                # /report 1 인 경우 오늘 00:00:00 부터
+                start_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                # 그 외에는 요청한 일수만큼 이전부터
+                start_dt = datetime.now() - timedelta(days=days)
+            
+            start_ts = int(start_dt.timestamp() * 1000)
+            
             pnls = []
             for item in data:
                 cTime = int(item.get('cTime', 0))
-                if cTime < int((datetime.now() - timedelta(days=days)).timestamp() * 1000):
+                if cTime < start_ts:
                     continue
                 
-                # Realized PnL 필드 추출
+                # Realized PnL 추출
                 val = item.get('realizedPnl') or item.get('pnl')
                 if val is not None:
                     pnls.append(float(val))
@@ -52,7 +63,8 @@ async def get_combined_report(days):
             pnls.reverse() 
 
             if not pnls:
-                return f"📊 **최근 {days}일간 종료된 포지션 내역이 없습니다.**"
+                date_str = start_dt.strftime('%Y-%m-%d %H:%M')
+                return f"📊 **{date_str} 이후로 종료된 포지션 내역이 없습니다.**"
 
             # 지표 계산
             total_trades = len(pnls)
@@ -85,10 +97,10 @@ async def get_combined_report(days):
                     max_con_losses = max(max_con_losses, curr_losses)
 
             # 출력 양식 구성
-            start_str = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-            now_str = datetime.now().strftime('%Y-%m-%d')
+            start_label = start_dt.strftime('%Y-%m-%d %H:%M')
+            now_label = datetime.now().strftime('%Y-%m-%d %H:%M')
             
-            report = f"📊 **성과 리포트 — 기간 ({start_str} ~ {now_str})**\n"
+            report = f"📊 **성과 리포트 — 기간 ({start_label} ~ {now_label})**\n"
             report += "━━━━━━━━━━━━━━━━━━\n"
             report += f"• **총 거래:** {total_trades}건 (승 {len(wins)} / 패 {len(losses)})\n"
             report += f"• **승률:** {win_rate:.1f}%\n"
