@@ -5,10 +5,10 @@ import aiohttp
 import base64
 from datetime import datetime, timedelta
 
-# --- OKX API 설정 (Passphrase가 반드시 필요합니다) ---
+# --- OKX API 설정 ---
 OKX_API_KEY    = "b3bbbe7f-3782-4d4c-abe6-abfb6995b387"
 OKX_API_SECRET = "1862D6D68735644487A1CB210DA841AF"
-OKX_PASSPHRASE = "Lim1004!" # OKX는 키 만들 때 직접 정한 비번이 하나 더 있습니다.
+OKX_PASSPHRASE = "Lim1004!"
 
 def okx_sign(timestamp, method, request_path, secret):
     message = timestamp + method + request_path
@@ -16,9 +16,9 @@ def okx_sign(timestamp, method, request_path, secret):
     return base64.b64encode(mac.digest()).decode("utf-8")
 
 async def get_combined_report(days):
-    # 최근 3개월 내역까지 조회 가능한 OKX V5 경로
     method = "GET"
-    request_path = "/api/v5/account/bills?instType=SWAP&mgnMode=cross&type=5" # type 5가 실현손익 내역
+    # 필터를 제거하고 전체 내역을 가져온 뒤 코드에서 선별합니다 (가장 확실한 방법)
+    request_path = "/api/v5/account/bills?instType=SWAP&limit=50" 
     timestamp = datetime.utcnow().isoformat()[:-3] + "Z"
     
     headers = {
@@ -35,19 +35,30 @@ async def get_combined_report(days):
             res = await response.json()
             
             if res.get("code") != "0":
-                return f"❌ **OKX API 에러**\n- 메시지: {res.get('msg')}\n(OKX는 Passphrase가 틀리면 인증이 안 됩니다.)"
+                return f"❌ **OKX API 에러**: {res.get('msg')}"
 
             data = res.get("data", [])
-            if not data:
-                return f"📊 **최근 {days}일간 OKX 매매 내역이 없습니다.**"
-
-            # pnl 필드를 합산하여 계산
-            pnls = [float(item['pnl']) for item in data if item.get('pnl')]
-            total_pnl = sum(pnls)
             
-            report = f"📊 **OKX 성과 리포트**\n"
+            # 실제 손익(pnl)이 0이 아닌 것들만 골라냅니다.
+            valid_pnls = []
+            for item in data:
+                pnl = float(item.get('pnl', 0))
+                # type 5(실현손익), 2(포지션종료) 등 수익 관련 내역 필터링
+                if pnl != 0:
+                    valid_pnls.append(pnl)
+
+            if not valid_pnls:
+                return f"📊 **최근 {days}일간 OKX 매매 내역이 없습니다.**\n(지갑이 'Trading Account'인지 확인해주세요!)"
+
+            total_pnl = sum(valid_pnls)
+            wins = [p for p in valid_pnls if p > 0]
+            losses = [p for p in valid_pnls if p < 0]
+            
+            report = f"📊 **성과 리포트 — OKX**\n"
             report += "━━━━━━━━━━━━━━━━━━\n"
-            report += f"• **총 거래:** {len(pnls)}건\n"
+            report += f"• **총 거래:** {len(valid_pnls)}건 (승 {len(wins)} / 패 {len(losses)})\n"
             report += f"• **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.2f} USDT\n"
+            report += f"• **최대 수익:** {max(valid_pnls) if valid_pnls else 0:+.2f} USDT\n"
+            report += f"• **최대 손실:** {min(valid_pnls) if valid_pnls else 0:+.2f} USDT\n"
             
             return report
