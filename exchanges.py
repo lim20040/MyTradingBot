@@ -5,10 +5,10 @@ import aiohttp
 import base64
 from datetime import datetime, timedelta, timezone
 
-# --- OKX API 설정 (본인 키로 수정) ---
+# --- OKX API 설정 ---
 OKX_API_KEY    = "b3bbbe7f-3782-4d4c-abe6-abfb6995b387"
 OKX_API_SECRET = "1862D6D68735644487A1CB210DA841AF"
-OKX_PASSPHRASE = "lIM1004!"
+OKX_PASSPHRASE = "Lim1004!"
 
 def okx_sign(timestamp, method, request_path, secret):
     message = timestamp + method + request_path
@@ -23,17 +23,17 @@ async def get_combined_report(query, current_seed, is_summary=False):
     now_kst = now_utc + timedelta(hours=9)
     timestamp_okx = now_utc.isoformat()[:-9] + "Z"
     
+    # --- 시간 범위 설정 ---
     try:
         target_date = datetime.strptime(str(query), "%Y-%m-%d")
         start_dt = target_date.replace(hour=0, minute=0, second=0)
         end_dt = target_date.replace(hour=23, minute=59, second=59)
     except ValueError:
         days = int(query)
-        if days == 1:
-            start_dt = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            start_dt = (now_kst - timedelta(days=days-1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_dt = now_kst
+        # 시작 시점: 오늘(1일)이면 오늘 00:00부터, n일이면 n일 전 00:00부터
+        start_dt = (now_kst - timedelta(days=days-1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        # 종료 시점: 현재 시간보다 넉넉하게 미래로 잡아 누락 방지
+        end_dt = now_kst + timedelta(hours=2)
     
     start_ts = int(start_dt.timestamp() * 1000)
     end_ts = int(end_dt.timestamp() * 1000)
@@ -53,57 +53,39 @@ async def get_combined_report(query, current_seed, is_summary=False):
             data = res.get("data", [])
             
             total_realized_pnl = 0
-            total_fee = 0
+            total_payback = 0
             trades_count = 0
-            win_list = []
-            loss_list = []
-            
-            # 시간 순서대로 계산하기 위해 뒤집기
-            data.reverse()
 
             for item in data:
-                cTime = int(item.get('cTime', 0))
-                if start_ts <= cTime <= end_ts:
-                    pnl = float(item.get('realizedPnl') or 0)
-                    # 수수료는 보통 음수(-)로 찍히므로 절대값으로 합산
-                    fee = abs(float(item.get('fee') or 0))
+                # OKX는 cTime(생성시간)이나 uTime(수정시간)을 기준으로 잡는데, 둘 중 하나라도 범위 안에 있으면 포함
+                item_time = int(item.get('uTime') or item.get('cTime', 0))
+                
+                if start_ts <= item_time <= end_ts:
+                    pnl = float(item.get('realizedPnl') or 0.0)
+                    fee = abs(float(item.get('fee') or 0.0)) # 수수료 절대값
                     
                     total_realized_pnl += pnl
-                    total_fee += fee
+                    total_payback += (fee * 0.3) # 냈던 수수료의 30%를 페이백으로 더함
                     trades_count += 1
-                    
-                    if pnl > 0: win_list.append(pnl)
-                    elif pnl < 0: loss_list.append(pnl)
 
             if trades_count == 0:
-                return f"📊 **{start_dt.strftime('%m-%d')} 내역이 없습니다.**"
+                return f"📊 {start_dt.strftime('%m-%d')} 이후 내역이 없습니다."
 
-            # --- 페이백 계산 (30%) ---
-            payback_amount = total_fee * 0.30
-            final_pnl = total_realized_pnl + payback_amount
-            roi = (final_pnl / current_seed) * 100
+            final_total_pnl = total_realized_pnl + total_payback
+            roi = (final_total_pnl / current_seed) * 100
 
-            # --- [현재 수익 현황] 요약 모드 ---
             if is_summary:
-                report = f"📈 **자산 현황 (페이백 포함)**\n"
-                report += f"━━━━━━━━━━━━━━━━━━\n"
-                report += f"💰 기준 시드: `{current_seed}` USDT\n"
-                report += f"💵 확정 수익: {total_realized_pnl:+.2f} USDT\n"
-                report += f"🎁 예상 페이백(30%): {payback_amount:+.2f} USDT\n"
-                report += f"📊 합계 ROI: **{roi:+.2f}%**\n"
-                return report
+                return (f"📈 **자산 현황 요약**\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"💵 매매 손익: {total_realized_pnl:+.2f} USDT\n"
+                        f"🎁 수수료 페이백: {total_payback:+.2f} USDT\n"
+                        f"📊 최종 ROI: **{roi:+.2f}%**")
 
-            # --- [상세 리포트] 모드 ---
-            win_rate = (len(win_list) / trades_count * 100)
-            
-            report = f"📊 **성과 리포트 (페이백 반영)**\n"
-            report += f"📅 {start_dt.strftime('%m-%d')} ~ {end_dt.strftime('%m-%d')}\n"
-            report += "━━━━━━━━━━━━━━━━━━\n"
-            report += f"• **총 거래:** {trades_count}건 (승 {len(win_list)} / 패 {len(loss_list)})\n"
-            report += f"• **승률:** {win_rate:.1f}%\n"
-            report += f"• **매매 손익:** {total_realized_pnl:+.2f} USDT\n"
-            report += f"• **페이백 합산:** {final_pnl:+.2f} USDT\n"
-            report += f"• **최종 수익률:** **{roi:+.2f}%**\n"
-            report += f"• **평균 익/손:** {sum(win_list)/len(win_list) if win_list else 0:+.2f} / {sum(loss_list)/len(loss_list) if loss_list else 0:+.2f}"
-            
-            return report
+            return (f"📊 **상세 리포트**\n"
+                    f"📅 {start_dt.strftime('%m-%d')} ~ {now_kst.strftime('%m-%d %H:%M')}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"• 거래 건수: {trades_count}건\n"
+                    f"• 순수 매매: {total_realized_pnl:+.2f} USDT\n"
+                    f"• 예상 페이백: {total_payback:+.2f} USDT\n"
+                    f"• 합산 수익: **{final_total_pnl:+.2f}** USDT\n"
+                    f"• 수익률: **{roi:+.2f}%**")
