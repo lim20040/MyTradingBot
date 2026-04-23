@@ -5,26 +5,24 @@ import aiohttp
 import base64
 from datetime import datetime, timedelta, timezone
 
-# --- OKX API 설정 (본인 키 입력) ---
+# --- OKX API 설정 (본인 키로 수정) ---
 OKX_API_KEY    = "b3bbbe7f-3782-4d4c-abe6-abfb6995b387"
 OKX_API_SECRET = "1862D6D68735644487A1CB210DA841AF"
-OKX_PASSPHRASE = "Lim1004!"
+OKX_PASSPHRASE = "lIM1004!"
 
 def okx_sign(timestamp, method, request_path, secret):
     message = timestamp + method + request_path
     mac = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256)
     return base64.b64encode(mac.digest()).decode("utf-8")
 
-async def get_combined_report(query, current_seed):
+async def get_combined_report(query, current_seed, is_summary=False):
     method = "GET"
-    request_path = "/api/v5/account/positions-history?instType=SWAP&limit=50"
+    request_path = "/api/v5/account/positions-history?instType=SWAP&limit=100"
     
-    # 시간 설정 (KST 강제 적용)
     now_utc = datetime.now(timezone.utc)
     now_kst = now_utc + timedelta(hours=9)
     timestamp_okx = now_utc.isoformat()[:-9] + "Z"
     
-    # 기간 판별 로직
     try:
         target_date = datetime.strptime(str(query), "%Y-%m-%d")
         start_dt = target_date.replace(hour=0, minute=0, second=0)
@@ -54,54 +52,58 @@ async def get_combined_report(query, current_seed):
             res = await response.json()
             data = res.get("data", [])
             
-            pnls = []
+            total_realized_pnl = 0
+            total_fee = 0
+            trades_count = 0
+            win_list = []
+            loss_list = []
+            
+            # 시간 순서대로 계산하기 위해 뒤집기
+            data.reverse()
+
             for item in data:
                 cTime = int(item.get('cTime', 0))
                 if start_ts <= cTime <= end_ts:
-                    val = item.get('realizedPnl') or item.get('pnl')
-                    if val is not None:
-                        pnls.append(float(val))
+                    pnl = float(item.get('realizedPnl') or 0)
+                    # 수수료는 보통 음수(-)로 찍히므로 절대값으로 합산
+                    fee = abs(float(item.get('fee') or 0))
+                    
+                    total_realized_pnl += pnl
+                    total_fee += fee
+                    trades_count += 1
+                    
+                    if pnl > 0: win_list.append(pnl)
+                    elif pnl < 0: loss_list.append(pnl)
 
-            pnls.reverse() 
+            if trades_count == 0:
+                return f"📊 **{start_dt.strftime('%m-%d')} 내역이 없습니다.**"
 
-            if not pnls:
-                return f"📊 **{start_dt.strftime('%m-%d')} 기간에 내역이 없습니다.**"
+            # --- 페이백 계산 (30%) ---
+            payback_amount = total_fee * 0.30
+            final_pnl = total_realized_pnl + payback_amount
+            roi = (final_pnl / current_seed) * 100
 
-            # 지표 계산
-            total_trades = len(pnls)
-            wins = [p for p in pnls if p > 0]
-            losses = [p for p in pnls if p < 0]
-            total_pnl = sum(pnls)
+            # --- [현재 수익 현황] 요약 모드 ---
+            if is_summary:
+                report = f"📈 **자산 현황 (페이백 포함)**\n"
+                report += f"━━━━━━━━━━━━━━━━━━\n"
+                report += f"💰 기준 시드: `{current_seed}` USDT\n"
+                report += f"💵 확정 수익: {total_realized_pnl:+.2f} USDT\n"
+                report += f"🎁 예상 페이백(30%): {payback_amount:+.2f} USDT\n"
+                report += f"📊 합계 ROI: **{roi:+.2f}%**\n"
+                return report
+
+            # --- [상세 리포트] 모드 ---
+            win_rate = (len(win_list) / trades_count * 100)
             
-            # 수익률(ROI) 계산
-            roi = (total_pnl / current_seed) * 100
-            
-            win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
-            avg_win = sum(wins) / len(wins) if wins else 0
-            avg_loss = sum(losses) / len(losses) if losses else 0
-            max_win = max(wins) if wins else 0.0
-            max_loss = min(losses) if losses else 0.0
-
-            # 연속 최대 승/패
-            max_con_wins, max_con_losses, curr_wins, curr_losses = 0, 0, 0, 0
-            for p in pnls:
-                if p > 0:
-                    curr_wins += 1; curr_losses = 0
-                    max_con_wins = max(max_con_wins, curr_wins)
-                elif p < 0:
-                    curr_losses += 1; curr_wins = 0
-                    max_con_losses = max(max_con_losses, curr_losses)
-
-            # 리포트 출력 양식
-            report = f"📊 **성과 리포트 (KST)**\n"
-            report += f"📅 {start_dt.strftime('%m-%d %H:%M')} ~ {end_dt.strftime('%m-%d %H:%M')}\n"
+            report = f"📊 **성과 리포트 (페이백 반영)**\n"
+            report += f"📅 {start_dt.strftime('%m-%d')} ~ {end_dt.strftime('%m-%d')}\n"
             report += "━━━━━━━━━━━━━━━━━━\n"
-            report += f"• **총 거래:** {total_trades}건 (승 {len(wins)} / 패 {len(losses)})\n"
+            report += f"• **총 거래:** {trades_count}건 (승 {len(win_list)} / 패 {len(loss_list)})\n"
             report += f"• **승률:** {win_rate:.1f}%\n"
-            report += f"• **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.2f} USDT\n"
-            report += f"• **수익률(ROI):** {roi:+.2f}% (기준: {current_seed})\n"
-            report += f"• **평균 익/손:** {avg_win:+.2f} / {avg_loss:+.2f}\n"
-            report += f"• **최대 익/손:** {max_win:+.2f} / {max_loss:+.2f}\n"
-            report += f"• **연속 승/패:** {max_con_wins}연승 / {max_con_losses}연패"
+            report += f"• **매매 손익:** {total_realized_pnl:+.2f} USDT\n"
+            report += f"• **페이백 합산:** {final_pnl:+.2f} USDT\n"
+            report += f"• **최종 수익률:** **{roi:+.2f}%**\n"
+            report += f"• **평균 익/손:** {sum(win_list)/len(win_list) if win_list else 0:+.2f} / {sum(loss_list)/len(loss_list) if loss_list else 0:+.2f}"
             
             return report
