@@ -11,7 +11,7 @@ TOKEN = "8235198849:AAG_EhtfSFihmtnaAmskdq1BfnyO0DAhiBY"
 SET_SEED = 1  # 대화 상태값
 
 # 임시 메모리 저장소 (재배포 시 초기화됨)
-user_info = {"seed": 1000.0}
+user_info = {"seed": 2000.0}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
