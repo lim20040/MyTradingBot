@@ -56,9 +56,7 @@ async def get_combined_report(query, current_seed, is_summary=False):
             pnls = []
 
             for item in data:
-                # uTime(정산시간) 기준 필터링
                 item_time = int(item.get('uTime') or item.get('cTime') or 0)
-                
                 if start_ts <= item_time <= end_ts:
                     pnl = float(item.get('realizedPnl') or 0.0)
                     total_pnl += pnl
@@ -70,15 +68,21 @@ async def get_combined_report(query, current_seed, is_summary=False):
             if trades_count == 0:
                 return f"📊 {start_dt.strftime('%m-%d')} 이후 내역이 없습니다."
 
-            # 지표 계산
+            # --- 핵심 계산 로직 ---
             roi = (total_pnl / current_seed) * 100
             win_rate = (len(wins) / trades_count * 100)
-            avg_win = sum(wins)/len(wins) if wins else 0.0
-            avg_loss = sum(losses)/len(losses) if losses else 0.0
             
+            # 이익 처리
+            avg_win = sum(wins)/len(wins) if wins else 0.0
+            max_win = max(wins) if wins else 0.0
+            
+            # 손실 처리: 데이터가 있으면 부호 포함 계산, 없으면 0.0
+            avg_loss = sum(losses)/len(losses) if losses else 0.0
+            max_loss = min(losses) if losses else 0.0
+
             # 연속 승/패 계산
             max_con_wins, max_con_losses, curr_wins, curr_losses = 0, 0, 0, 0
-            for p in reversed(pnls): # 시간순 정렬 위해 리버스
+            for p in reversed(pnls):
                 if p > 0:
                     curr_wins += 1; curr_losses = 0
                     max_con_wins = max(max_con_wins, curr_wins)
@@ -86,7 +90,7 @@ async def get_combined_report(query, current_seed, is_summary=False):
                     curr_losses += 1; curr_wins = 0
                     max_con_losses = max(max_con_losses, curr_losses)
 
-            # --- 사진 양식 그대로 출력 ---
+            # --- 출력 양식 ---
             title = "💰 **현재 수익 현황**" if is_summary else "📊 **성과 리포트**"
             
             report = f"{title}\n"
@@ -97,8 +101,9 @@ async def get_combined_report(query, current_seed, is_summary=False):
             report += f"• **승률:** {win_rate:.1f}%\n"
             report += f"• **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.2f} USDT\n"
             report += f"• **수익률(ROI):** {roi:+.2f}% (기준: {current_seed})\n"
-            report += f"• **평균 익/손:** {avg_win:+.2f} / {avg_loss:+.2f}\n"
-            report += f"• **최대 익/손:** {max(pnls) if pnls else 0:+.2f} / {min(pnls) if pnls else 0:+.2f}\n"
+            # 평균/최대 익손 출력: 이익은 '+', 손실은 데이터 부호 그대로('.')
+            report += f"• **평균 익/손:** {avg_win:+.2f} / {avg_loss:.2f} USDT\n"
+            report += f"• **최대 익/손:** {max_win:+.2f} / {max_loss:.2f} USDT\n"
             report += f"• **연속 승/패:** {max_con_wins}연승 / {max_con_losses}연패"
             
             return report
