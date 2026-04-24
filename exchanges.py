@@ -5,105 +5,88 @@ import aiohttp
 import base64
 from datetime import datetime, timedelta, timezone
 
-# --- OKX API 설정 (본인의 키로 수정하세요) ---
+# --- OKX API 및 기본 설정 ---
 OKX_API_KEY    = "b3bbbe7f-3782-4d4c-abe6-abfb6995b387"
 OKX_API_SECRET = "1862D6D68735644487A1CB210DA841AF"
 OKX_PASSPHRASE = "Lim1004!"
 
-def okx_sign(timestamp, method, request_path, secret):
-    message = timestamp + method + request_path
-    mac = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256)
-    return base64.b64encode(mac.digest()).decode("utf-8")
+# 사용자 기준 시점 (2026-04-23 00:00 KST)
+APP_START_DATE = datetime(2026, 4, 23, 0, 0, 0, tzinfo=timezone(timedelta(hours=9)))
 
-async def get_combined_report(query, current_seed):
+async def get_combined_report(period_type, current_seed):
     method = "GET"
     request_path = "/api/v5/account/positions-history?instType=SWAP&limit=100"
     
-    now_utc = datetime.now(timezone.utc)
-    now_kst = now_utc + timedelta(hours=9)
-    timestamp_okx = now_utc.isoformat()[:-9] + "Z"
+    now_kst = datetime.now(timezone(timedelta(hours=9)))
     
-    # --- 조회 기간 설정 (숫자 또는 날짜) ---
-    try:
-        # 입력값이 숫자인 경우 (예: "1", "7")
-        days = int(query)
-        start_dt = (now_kst - timedelta(days=days-1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_dt = now_kst + timedelta(hours=2) # 시간 오차 방지
-    except ValueError:
-        # 입력값이 날짜 형식인 경우 (예: "2026-04-23")
-        try:
-            start_dt = datetime.strptime(str(query), "%Y-%m-%d")
-            end_dt = start_dt.replace(hour=23, minute=59, second=59)
-        except ValueError:
-            return "❌ 날짜 형식이 잘못되었습니다. (예: 1, 7 또는 2026-04-23)"
-    
-    start_ts = int(start_dt.timestamp() * 1000)
-    end_ts = int(end_dt.timestamp() * 1000)
+    # --- 기간 설정 로직 ---
+    if period_type == 'today':
+        start_dt = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period_type == '2days':
+        start_dt = (now_kst - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period_type == 'week':
+        # 이번 주 월요일 00:00
+        start_dt = (now_kst - timedelta(days=now_kst.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period_type == 'month':
+        # 이번 달 1일 00:00
+        start_dt = now_kst.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif period_type == 'year':
+        # 올해 1월 1일 00:00
+        start_dt = now_kst.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        start_dt = APP_START_DATE
 
+    # [핵심] 어제(04-23) 이전 데이터는 무시 (수학적 Max 함수 개념)
+    actual_start_dt = max(start_dt, APP_START_DATE)
+    start_ts = int(actual_start_dt.timestamp() * 1000)
+    end_ts = int((now_kst + timedelta(hours=1)).timestamp() * 1000)
+
+    # API 서명 및 요청
+    timestamp_okx = datetime.now(timezone.utc).isoformat()[:-9] + "Z"
     headers = {
         "OK-ACCESS-KEY": OKX_API_KEY,
-        "OK-ACCESS-SIGN": okx_sign(timestamp_okx, method, request_path, OKX_API_SECRET),
+        "OK-ACCESS-SIGN": base64.b64encode(hmac.new(OKX_API_SECRET.encode("utf-8"), 
+                          (timestamp_okx + method + request_path).encode("utf-8"), hashlib.sha256).digest()).decode("utf-8"),
         "OK-ACCESS-TIMESTAMP": timestamp_okx,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json"
     }
 
     async with aiohttp.ClientSession() as session:
-        url = f"https://www.okx.com{request_path}"
-        async with session.get(url, headers=headers) as response:
+        async with session.get(f"https://www.okx.com{request_path}", headers=headers) as response:
             res = await response.json()
-            if res.get("code") != "0":
-                return f"❌ OKX 에러: {res.get('msg')}"
-                
             data = res.get("data", [])
-            total_pnl = 0.0
-            trades_count = 0
-            wins, losses, pnls = [], [], []
+            
+            total_pnl, wins, losses = 0.0, [], []
 
             for item in data:
-                uTime = int(item.get('uTime') or 0)
-                cTime = int(item.get('cTime') or 0)
-                item_time = max(uTime, cTime)
-                
+                item_time = max(int(item.get('uTime') or 0), int(item.get('cTime') or 0))
+                # 지정된 범위 내 데이터만 합산
                 if start_ts <= item_time <= end_ts:
                     pnl = float(item.get('realizedPnl') or 0.0)
                     total_pnl += pnl
-                    trades_count += 1
-                    pnls.append(pnl)
                     if pnl > 0: wins.append(pnl)
                     elif pnl < 0: losses.append(pnl)
 
+            trades_count = len(wins) + len(losses)
             if trades_count == 0:
-                return f"📊 {start_dt.strftime('%m-%d')} 기간의 내역이 없습니다."
+                return f"📊 {actual_start_dt.strftime('%Y-%m-%d')} 이후 내역이 없습니다."
 
             # 지표 계산
-            roi = (total_pnl / current_seed) * 100
             win_rate = (len(wins) / trades_count * 100)
             avg_win = sum(wins)/len(wins) if wins else 0.0
             avg_loss = sum(losses)/len(losses) if losses else 0.0
             max_win = max(wins) if wins else 0.0
             max_loss = min(losses) if losses else 0.0
 
-            # 연속 승/패 계산
-            max_con_wins, max_con_losses, curr_wins, curr_losses = 0, 0, 0, 0
-            for p in reversed(pnls):
-                if p > 0:
-                    curr_wins += 1; curr_losses = 0
-                    max_con_wins = max(max_con_wins, curr_wins)
-                elif p < 0:
-                    curr_losses += 1; curr_wins = 0
-                    max_con_losses = max(max_con_losses, curr_losses)
-
-            # --- 출력 양식 구성 ---
+            # --- 요청하신 5가지 항목 리포트 구성 ---
             report = f"📊 **성과 리포트 (KST)**\n"
-            report += f"📅 {start_dt.strftime('%m-%d %H:%M')} ~ {now_kst.strftime('%m-%d %H:%M')}\n"
+            report += f"📅 {actual_start_dt.strftime('%Y-%m-%d')} ~ {now_kst.strftime('%Y-%m-%d %H:%M')}\n"
             report += "━━━━━━━━━━━━━━━━━━\n\n"
-            report += f"• **총 거래:** {trades_count}건 (승 {len(wins)} / 패 {len(losses)})\n"
-            report += f"• **승률:** {win_rate:.1f}%\n"
-            report += f"• **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.2f} USDT\n"
-            report += f"• **수익률(ROI):** {roi:+.2f}% (기준: {current_seed})\n"
-            report += f"• **평균 익/손:** {avg_win:+.2f} / {avg_loss:.2f} USDT\n"
-            report += f"• **최대 익/손:** {max_win:+.2f} / {max_loss:.2f} USDT\n"
-            report += f"• **연속 승/패:** {max_con_wins}연승 / {max_con_losses}연패"
+            report += f"1️⃣ **총 거래:** {trades_count}건 (승 {len(wins)} / 패 {len(losses)})\n"
+            report += f"2️⃣ **승률:** {win_rate:.1f}%\n"
+            report += f"3️⃣ **총 손익:** {'🟢' if total_pnl >= 0 else '🔴'} {total_pnl:+.2f} USDT\n"
+            report += f"4️⃣ **평균 익/손:** {avg_win:+.2f} / {avg_loss:.2f} USDT\n"
+            report += f"5️⃣ **최대 익/손:** {max_win:+.2f} / {max_loss:.2f} USDT"
             
             return report
